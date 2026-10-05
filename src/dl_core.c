@@ -296,7 +296,7 @@ static int read_response(dl_sock_t s, http_resp_t *r, char *location, int loccap
             long long a = 0;
             long long b = 0;
             long long t = -1;
-            /* бывает "bytes 0-0/*", тогда sscanf вернёт 2 */
+            /* бывает звёздочка вместо размера, тогда sscanf вернёт 2 */
             if (sscanf(line + 14, "bytes %lld-%lld/%lld", &a, &b, &t) >= 2) {
                 r->range_total = t;
             }
