@@ -87,9 +87,10 @@ int main(int argc, char **argv)
     (void)argv;
 
 #ifdef __linux__
-    /* Меньше malloc-арен glibc -> меньше виртуалки.
-     * Двух арен хватает за глаза (main + пул воркеров делят). */
-    mallopt(M_ARENA_MAX, 2);
+    /* Одна malloc-арена на всех: новые арены (по 64 МБ виртуалки
+     * каждая) больше не создаются. Контеншна нет - аллокаций
+     * у нас кот наплакал, все потоки в основном спят в recv. */
+    mallopt(M_ARENA_MAX, 1);
 #endif
 
     printf("fast-downloader (C, Linux). http:// и https:// (BearSSL).\n");
