@@ -2,41 +2,49 @@ name: build
 
 on:
   push:
-    branches: [main, master]
+    branches: [c-port]
   pull_request:
+    branches: [c-port]
   workflow_dispatch:
-  release:
-    types: [published]
 
 jobs:
-  build:
-    runs-on: windows-latest
+  linux:
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Setup .NET SDK
-        uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: 8.0.x
+          ref: c-port
 
-      - name: Restore
-        run: dotnet restore MultiThreadDownloader.sln
-
-      - name: Build Release
-        run: dotnet build MultiThreadDownloader.sln -c Release --no-restore
-
-      - name: Publish net20
-        run: dotnet publish src/MultiThreadDownloader/MultiThreadDownloader.csproj -c Release -o publish/net20 --no-build
-
-      - name: Zip artifact
-        shell: pwsh
-        run: Compress-Archive -Path publish/net20/* -DestinationPath MultiThreadDownloader-net20.zip -Force
+      - name: Build (gcc)
+        run: make
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: MultiThreadDownloader-net20
-          path: |
-            publish/net20/
-            MultiThreadDownloader-net20.zip
+          name: downloader-linux
+          path: downloader
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: c-port
+
+      - name: Setup MSYS2 + MinGW
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          install: mingw-w64-x86_64-gcc mingw-w64-x86_64-make make
+
+      - name: Build (MinGW gcc)
+        shell: msys2 {0}
+        run: mingw32-make
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: downloader-windows
+          path: downloader.exe

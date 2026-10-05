@@ -1,6 +1,6 @@
-bin/
-obj/
-.vs/
-*.user
-*.suo
+downloader
+downloader.exe
+*.o
+*.obj
 history.csv
+.vs/
