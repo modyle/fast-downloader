@@ -1,0 +1,42 @@
+name: build
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+  release:
+    types: [published]
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Restore
+        run: dotnet restore MultiThreadDownloader.sln
+
+      - name: Build Release
+        run: dotnet build MultiThreadDownloader.sln -c Release --no-restore
+
+      - name: Publish net20
+        run: dotnet publish src/MultiThreadDownloader/MultiThreadDownloader.csproj -c Release -o publish/net20 --no-build
+
+      - name: Zip artifact
+        shell: pwsh
+        run: Compress-Archive -Path publish/net20/* -DestinationPath MultiThreadDownloader-net20.zip -Force
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MultiThreadDownloader-net20
+          path: |
+            publish/net20/
+            MultiThreadDownloader-net20.zip

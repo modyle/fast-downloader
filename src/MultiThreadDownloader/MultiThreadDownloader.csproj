@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net20</TargetFramework>
+    <!-- Строго старый язык: только конструкции C# 2.0 -->
+    <LangVersion>ISO-2</LangVersion>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <Nullable>disable</Nullable>
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+    <AssemblyName>MultiThreadDownloader</AssemblyName>
+    <RootNamespace>MultiThreadDownloader</RootNamespace>
+    <Version>1.0.0</Version>
+    <Company>MultiThreadDownloader</Company>
+    <Product>MultiThreadDownloader</Product>
+    <Copyright>MIT</Copyright>
+    <Description>Многопоточный загрузчик файлов (.NET 2.0, C# 2.0, до 32 потоков, адаптивный режим)</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="all" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Reference Include="System" />
+    <Reference Include="System.Data" />
+    <Reference Include="System.Drawing" />
+    <Reference Include="System.Windows.Forms" />
+    <Reference Include="System.Xml" />
+  </ItemGroup>
+
+</Project>
