@@ -21,7 +21,7 @@ CFLAGS ?= -O2 -Wall -Wextra
 ifdef IS_WIN
   TARGET := downloader.exe
   SRCS := src/dl_port.c src/dl_core.c src/dl_hist.c src/main_win32.c
-  LIBS := -lws2_32 -lcomctl32
+  LIBS := -lws2_32 -lcomctl32 -lcomdlg32 -lgdi32 -lshell32
   RM := del /Q 2>NUL
 else
   TARGET := downloader
