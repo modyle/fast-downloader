@@ -64,8 +64,16 @@ int dl_sock_init(void);      /* WSAStartup / nop, 0 = ok */
 void dl_sock_cleanup(void);
 void dl_sock_close(dl_sock_t s);
 
-/* --- файлы с 64-битными смещениями --- */
-int dl_fseek64(FILE *f, long long off, int whence);
-int dl_prealloc(FILE *f, long long size); /* 0 = ok */
+/* --- файлы с 64-битными смещениями (сырые fd, без stdio) --- */
+typedef int dl_fd_t;
+#define DL_FD_INVALID (-1)
+
+dl_fd_t dl_fd_open_rw(const char *path); /* создать/обрезать, -1 = fail */
+dl_fd_t dl_fd_open_rw_existing(const char *path); /* открыть сущ., -1 = fail */
+int dl_fd_seek64(dl_fd_t fd, long long off);
+int dl_fd_write_all(dl_fd_t fd, const char *buf, int len); /* 0/-1 */
+int dl_fd_close(dl_fd_t fd);
+int dl_fd_prealloc(dl_fd_t fd, long long size); /* 0 = ok */
+long long dl_file_size(const char *path); /* -1 = нет файла */
 
 #endif /* DL_PORT_H */

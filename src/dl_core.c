@@ -275,34 +275,99 @@ static void conn_close(conn_t *c)
     }
 }
 
-/* строка без \r\n, 0..n-1 символов, -1 при обрыве */
-static int recv_line(conn_t *cn, char *buf, int cap)
+/* ================= буферизированный reader =================
+ * Читает сокет чанками 4 КБ, строки отдаёт из буфера (а не syscall
+ * на каждый байт, как было). Тело - через lr_read, который сначала
+ * отдаёт остаток буфера. Корректно, т.к. сервер шлёт ровно
+ * запрошенное (Connection: close): перечитать лишнего нечего. */
+typedef struct {
+    conn_t *cn;
+    unsigned char buf[4096];
+    int pos;
+    int len;
+    int eof;
+} lr_t;
+
+static void lr_init(lr_t *lr, conn_t *cn)
+{
+    lr->cn = cn;
+    lr->pos = 0;
+    lr->len = 0;
+    lr->eof = 0;
+}
+
+static int lr_fill(lr_t *lr)
+{
+    int r;
+    if (lr->eof) {
+        return -1;
+    }
+    r = conn_read(lr->cn, (char *)lr->buf, (int)sizeof(lr->buf));
+    if (r <= 0) {
+        lr->eof = 1;
+        return -1;
+    }
+    lr->pos = 0;
+    lr->len = r;
+    return 0;
+}
+
+/* 0+ = длина строки без \r\n, -1 при обрыве */
+static int lr_getline(lr_t *lr, char *out, int cap)
 {
     int n = 0;
-    while (n < cap - 1) {
-        char c;
-        int r = conn_read(cn, &c, 1);
-        if (r <= 0) {
-            if (n == 0) {
-                return -1;
+    int got_nl = 0;
+    while (!got_nl) {
+        if (lr->pos >= lr->len) {
+            if (lr_fill(lr) != 0) {
+                if (n == 0) {
+                    return -1;
+                }
+                break;
             }
-            break;
         }
-        if (c == '\n') {
-            break;
-        }
-        if (c != '\r') {
-            buf[n++] = c;
+        while (lr->pos < lr->len) {
+            char c = (char)lr->buf[lr->pos++];
+            if (c == '\n') {
+                got_nl = 1;
+                break;
+            }
+            if (c != '\r' && n < cap - 1) {
+                out[n++] = c;
+            }
         }
     }
-    buf[n] = 0;
+    out[n] = 0;
     return n;
+}
+
+/* Массовое чтение; возвращает >0 (сколько отдано) или -1 (сразу конец) */
+static int lr_read(lr_t *lr, char *out, int len)
+{
+    int done = 0;
+    while (done < len) {
+        if (lr->pos < lr->len) {
+            int avail = lr->len - lr->pos;
+            int take = (len - done < avail) ? (len - done) : avail;
+            memcpy(out + done, lr->buf + lr->pos, (size_t)take);
+            lr->pos += take;
+            done += take;
+        } else {
+            int r = conn_read(lr->cn, out + done, len - done);
+            if (r <= 0) {
+                break;
+            }
+            done += r;
+        }
+    }
+    return (done == 0) ? -1 : done;
 }
 
 /* ================= HTTP ================= */
 
 typedef struct {
     conn_t conn;
+    lr_t lr; /* reader поверх conn; lr.cn всегда -> &conn (чинить после копий!) */
     int status;
     long long length;   /* -1 = нет/чанки */
     int chunked;
@@ -310,13 +375,13 @@ typedef struct {
     long long range_total; /* из Content-Range, -1 */
 } http_resp_t;
 
-static int read_response(conn_t *cn, http_resp_t *r, char *location,
+static int read_response(lr_t *lr, http_resp_t *r, char *location,
                          int loccap)
 {
     char line[4096];
     int i;
 
-    if (recv_line(cn, line, (int)sizeof(line)) < 0) {
+    if (lr_getline(lr, line, (int)sizeof(line)) < 0) {
         return -1;
     }
     if (strncmp(line, "HTTP/", 5) != 0) {
@@ -331,7 +396,7 @@ static int read_response(conn_t *cn, http_resp_t *r, char *location,
         location[0] = 0;
     }
     for (i = 0; i < 200; i++) {
-        if (recv_line(cn, line, (int)sizeof(line)) < 0) {
+        if (lr_getline(lr, line, (int)sizeof(line)) < 0) {
             return -1;
         }
         if (line[0] == 0) {
@@ -477,7 +542,8 @@ static int http_open(const char *url, const char *method,
         }
         memset(&r, 0, sizeof(r));
         r.conn = cn;
-        if (read_response(&r.conn, &r, location,
+        lr_init(&r.lr, &r.conn);
+        if (read_response(&r.lr, &r, location,
                           (int)sizeof(location)) != 0) {
             if (is_https && ebuf != NULL && ecap > 0) {
                 snprintf(ebuf, (size_t)ecap, "tls i/o failed (code %d)",
@@ -494,6 +560,9 @@ static int http_open(const char *url, const char *method,
             continue;
         }
         *out = r;
+        /* lr хранит указатель на conn - после копирования структуры
+         * перепривязываем на новый адрес, иначе висячий указатель. */
+        out->lr.cn = &out->conn;
         return 0;
     }
     return -1; /* слишком много редиректов */
@@ -553,33 +622,17 @@ static void set_done(downloader_t *d, int st)
     dl_mutex_unlock(&d->mu);
 }
 
-static long long file_len(const char *path)
-{
-    FILE *f;
-    long long n;
-    f = fopen(path, "rb");
-    if (f == NULL) {
-        return -1;
-    }
-#ifdef _WIN32
-    _fseeki64(f, 0, SEEK_END);
-    n = (long long)_ftelli64(f);
-#else
-    fseeko(f, 0, SEEK_END);
-    n = (long long)ftello(f);
-#endif
-    fclose(f);
-    return n;
-}
-
 /* ================= один поток ================= */
 
-/* чтение chunked-тела в файл, 0 = ok */
-static int read_chunked(conn_t *cn, FILE *f, downloader_t *d,
+/* чтение chunked-тела в файл, 0 = ok.
+ * Счётчик прогресса обновляем раз в ~1 сек (а не на каждый кусок):
+ * мьютекс под каждую запись - лишняя возня при нулевом contention. */
+static int read_chunked(lr_t *lr, dl_fd_t fd, downloader_t *d,
                         long long *got)
 {
     char line[128];
     char *buf;
+    long long my = 0;
 
     buf = (char *)malloc(DL_BUF);
     if (buf == NULL) {
@@ -589,10 +642,9 @@ static int read_chunked(conn_t *cn, FILE *f, downloader_t *d,
         long chunk;
         long left;
         if (d->stop) {
-            free(buf);
-            return -2; /* стоп */
+            break;
         }
-        if (recv_line(cn, line, (int)sizeof(line)) < 0) {
+        if (lr_getline(lr, line, (int)sizeof(line)) < 0) {
             free(buf);
             return -1;
         }
@@ -604,7 +656,7 @@ static int read_chunked(conn_t *cn, FILE *f, downloader_t *d,
         if (chunk == 0) {
             /* трейлеры до пустой строки */
             for (;;) {
-                if (recv_line(cn, line, (int)sizeof(line)) < 0) {
+                if (lr_getline(lr, line, (int)sizeof(line)) < 0) {
                     break;
                 }
                 if (line[0] == 0) {
@@ -612,21 +664,30 @@ static int read_chunked(conn_t *cn, FILE *f, downloader_t *d,
                 }
             }
             free(buf);
+            if (my > 0) {
+                dl_mutex_lock(&d->mu);
+                d->downloaded += my;
+                dl_mutex_unlock(&d->mu);
+            }
+            if (got != NULL) {
+                *got += my;
+            }
             return 0;
         }
         left = chunk;
         while (left > 0) {
             int want = (left > DL_BUF) ? DL_BUF : (int)left;
-            int r = conn_read(cn, buf, want);
+            int r = lr_read(lr, buf, want);
             if (r <= 0) {
                 free(buf);
                 return -1;
             }
-            fwrite(buf, 1, (size_t)r, f);
+            if (dl_fd_write_all(fd, buf, r) != 0) {
+                free(buf);
+                return -1;
+            }
             left -= r;
-            dl_mutex_lock(&d->mu);
-            d->downloaded += r;
-            dl_mutex_unlock(&d->mu);
+            my += r;
             if (got != NULL) {
                 *got += r;
             }
@@ -634,16 +695,26 @@ static int read_chunked(conn_t *cn, FILE *f, downloader_t *d,
         /* CRLF после чанка */
         {
             char crlf[2];
-            int r = conn_read(cn, crlf, 2);
+            int r = lr_read(lr, crlf, 2);
             (void)r;
         }
     }
+    free(buf);
+    if (my > 0) {
+        dl_mutex_lock(&d->mu);
+        d->downloaded += my;
+        dl_mutex_unlock(&d->mu);
+    }
+    if (got != NULL) {
+        *got += my;
+    }
+    return -2; /* стоп */
 }
 
 static void download_single(downloader_t *d)
 {
     http_resp_t r;
-    FILE *f;
+    dl_fd_t fd;
     char *buf;
     double start;
     double last;
@@ -669,15 +740,16 @@ static void download_single(downloader_t *d)
     d->total = r.length;
     dl_mutex_unlock(&d->mu);
 
-    f = fopen(d->path, "wb");
-    if (f == NULL) {
+    /* Сырой fd вместо FILE*: убираем лишний memcpy через stdio-буфер. */
+    fd = dl_fd_open_rw(d->path);
+    if (fd == DL_FD_INVALID) {
         http_close(&r);
         set_fail(d, "cannot create file");
         return;
     }
     buf = (char *)malloc(DL_BUF);
     if (buf == NULL) {
-        fclose(f);
+        dl_fd_close(fd);
         http_close(&r);
         set_fail(d, "out of memory");
         return;
@@ -685,9 +757,9 @@ static void download_single(downloader_t *d)
     start = dl_now();
     last = start;
     if (r.chunked) {
-        int rc = read_chunked(&r.conn, f, d, NULL);
+        int rc = read_chunked(&r.lr, fd, d, NULL);
         free(buf);
-        fclose(f);
+        dl_fd_close(fd);
         http_close(&r);
         if (d->stop) {
             set_done(d, DL_CANCEL);
@@ -707,11 +779,14 @@ static void download_single(downloader_t *d)
             if (d->stop) {
                 break;
             }
-            got = conn_read(&r.conn, buf, want);
+            got = lr_read(&r.lr, buf, want);
             if (got <= 0) {
                 break;
             }
-            fwrite(buf, 1, (size_t)got, f);
+            if (dl_fd_write_all(fd, buf, got) != 0) {
+                left = -1; /* ошибка диска */
+                break;
+            }
             left -= got;
             dl_mutex_lock(&d->mu);
             d->downloaded += got;
@@ -731,14 +806,15 @@ static void download_single(downloader_t *d)
             }
         }
         free(buf);
-        fclose(f);
+        dl_fd_close(fd);
         http_close(&r);
         if (d->stop) {
             set_done(d, DL_CANCEL);
         } else if (left == 0) {
             set_done(d, DL_OK);
         } else {
-            set_fail(d, "connection cut (short body)");
+            set_fail(d, left < 0 ? "disk write failed"
+                                 : "connection cut (short body)");
         }
         return;
     }
@@ -749,11 +825,17 @@ static void download_single(downloader_t *d)
         if (d->stop) {
             break;
         }
-        got = conn_read(&r.conn, buf, DL_BUF);
+        got = lr_read(&r.lr, buf, DL_BUF);
         if (got <= 0) {
             break;
         }
-        fwrite(buf, 1, (size_t)got, f);
+        if (dl_fd_write_all(fd, buf, got) != 0) {
+            free(buf);
+            dl_fd_close(fd);
+            http_close(&r);
+            set_fail(d, "disk write failed");
+            return;
+        }
         dl_mutex_lock(&d->mu);
         d->downloaded += got;
         dl_mutex_unlock(&d->mu);
@@ -772,7 +854,7 @@ static void download_single(downloader_t *d)
         }
     }
     free(buf);
-    fclose(f);
+    dl_fd_close(fd);
     http_close(&r);
     if (d->stop) {
         set_done(d, DL_CANCEL);
@@ -783,7 +865,10 @@ static void download_single(downloader_t *d)
 
 /* ================= блоки ================= */
 
-static int download_block(downloader_t *d, int index)
+/* Буфер и fd - свои у каждого воркера (выделяются раз, а не на блок):
+ * меньше malloc/free/open/close, меньше возни в аллокаторе. */
+static int download_block(downloader_t *d, int index, char *buf,
+                          dl_fd_t *pfd)
 {
     long long total;
     long long bsize;
@@ -792,8 +877,6 @@ static int download_block(downloader_t *d, int index)
     long long want;
     long long got = 0;
     http_resp_t r;
-    FILE *f;
-    char *buf;
     int ok = 0;
 
     dl_mutex_lock(&d->mu);
@@ -823,19 +906,14 @@ static int download_block(downloader_t *d, int index)
         http_close(&r);
         return 0;
     }
-    f = fopen(d->path, "r+b");
-    if (f == NULL) {
-        http_close(&r);
-        return 0;
+    if (*pfd == DL_FD_INVALID) {
+        *pfd = dl_fd_open_rw_existing(d->path);
+        if (*pfd == DL_FD_INVALID) {
+            http_close(&r);
+            return 0;
+        }
     }
-    if (dl_fseek64(f, start, SEEK_SET) != 0) {
-        fclose(f);
-        http_close(&r);
-        return 0;
-    }
-    buf = (char *)malloc(DL_BUF);
-    if (buf == NULL) {
-        fclose(f);
+    if (dl_fd_seek64(*pfd, start) != 0) {
         http_close(&r);
         return 0;
     }
@@ -847,21 +925,31 @@ static int download_block(downloader_t *d, int index)
             ok = 1; /* выходим без перепостановки */
             break;
         }
-        n = conn_read(&r.conn, buf, want_now);
+        n = lr_read(&r.lr, buf, want_now);
         if (n <= 0) {
             break;
         }
-        fwrite(buf, 1, (size_t)n, f);
+        if (dl_fd_write_all(*pfd, buf, n) != 0) {
+            http_close(&r);
+            dl_mutex_lock(&d->mu);
+            d->state = DL_FAIL;
+            strncpy(d->error, "disk write failed", sizeof(d->error) - 1);
+            d->error[sizeof(d->error) - 1] = 0;
+            d->stop = 1;
+            dl_mutex_unlock(&d->mu);
+            return 0;
+        }
         got += n;
-        dl_mutex_lock(&d->mu);
-        d->downloaded += n;
-        dl_mutex_unlock(&d->mu);
     }
     if (got >= want) {
         ok = 1;
     }
-    free(buf);
-    fclose(f);
+    /* Прогресс - одним махом за блок, а не мьютекс на каждые 16 КБ. */
+    if (got > 0) {
+        dl_mutex_lock(&d->mu);
+        d->downloaded += got;
+        dl_mutex_unlock(&d->mu);
+    }
     http_close(&r);
     return ok;
 }
@@ -873,6 +961,20 @@ static void *dl_worker(void *arg)
 #endif
 {
     downloader_t *d = (downloader_t *)arg;
+    char *buf;
+    dl_fd_t fd = DL_FD_INVALID;
+
+    buf = (char *)malloc(DL_BUF);
+    if (buf == NULL) {
+        dl_mutex_lock(&d->mu);
+        d->alive--;
+        dl_mutex_unlock(&d->mu);
+#ifdef _WIN32
+        return 0;
+#else
+        return NULL;
+#endif
+    }
     for (;;) {
         int idx = -1;
         int ok;
@@ -887,7 +989,7 @@ static void *dl_worker(void *arg)
         if (idx < 0) {
             break; /* работы нет */
         }
-        ok = download_block(d, idx);
+        ok = download_block(d, idx, buf, &fd);
         if (d->stop) {
             break;
         }
@@ -919,6 +1021,10 @@ static void *dl_worker(void *arg)
             dl_sleep_ms(500);
         }
     }
+    if (fd != DL_FD_INVALID) {
+        dl_fd_close(fd);
+    }
+    free(buf);
     dl_mutex_lock(&d->mu);
     d->alive--;
     dl_mutex_unlock(&d->mu);
@@ -956,7 +1062,8 @@ static void download_multi(downloader_t *d, long long total)
     int i;
     double prev_t;
     long long prev_dl = 0;
-    FILE *pre;
+    dl_fd_t pre;
+    int no_worker_ticks = 0;
 
     if (block_size < DL_MIN_BLOCK) {
         block_size = DL_MIN_BLOCK;
@@ -986,17 +1093,17 @@ static void download_multi(downloader_t *d, long long total)
     d->alive = 0;
     dl_mutex_unlock(&d->mu);
 
-    pre = fopen(d->path, "w+b");
-    if (pre == NULL) {
+    pre = dl_fd_open_rw(d->path);
+    if (pre == DL_FD_INVALID) {
         set_fail(d, "cannot create file");
         return;
     }
-    if (dl_prealloc(pre, total) != 0) {
-        fclose(pre);
+    if (dl_fd_prealloc(pre, total) != 0) {
+        dl_fd_close(pre);
         set_fail(d, "cannot preallocate file");
         return;
     }
-    fclose(pre);
+    dl_fd_close(pre);
 
     if (!d->adaptive) {
         initial = (d->max_threads < block_count) ? d->max_threads : block_count;
@@ -1072,15 +1179,35 @@ static void download_multi(downloader_t *d, long long total)
         prev_dl = cur;
         prev_t = now;
 
-        if (cur >= total) {
-            break;
-        }
         dl_mutex_lock(&d->mu);
         alive = d->alive;
         waiting = d->qt - d->qh;
         dl_mutex_unlock(&d->mu);
+        /* Готово только когда очередь пуста И байты сошлись:
+         * ретраи могут временно завысить счётчик. */
+        if (waiting == 0 && cur >= total) {
+            break;
+        }
         if (waiting == 0 && alive == 0) {
             break;
+        }
+        /* Страховка от вечного висения: работа есть, а живых
+         * воркеров нет (все упали на malloc/open). */
+        if (waiting > 0 && alive == 0) {
+            if (++no_worker_ticks >= 2) {
+                dl_mutex_lock(&d->mu);
+                if (d->state == DL_RUNNING) {
+                    d->state = DL_FAIL;
+                    strncpy(d->error, "no live workers",
+                            sizeof(d->error) - 1);
+                    d->error[sizeof(d->error) - 1] = 0;
+                }
+                dl_mutex_unlock(&d->mu);
+                d->stop = 1;
+                break;
+            }
+        } else {
+            no_worker_ticks = 0;
         }
     }
 
@@ -1117,7 +1244,7 @@ static void download_multi(downloader_t *d, long long total)
             return;
         }
     }
-    if (file_len(d->path) >= total) {
+    if (dl_file_size(d->path) >= total) {
         set_done(d, DL_OK);
     } else {
         set_fail(d, "incomplete: server gave fewer bytes");

@@ -3,9 +3,13 @@
 
 #ifdef _WIN32
 #  include <io.h>
+#  include <fcntl.h>
+#  include <sys/stat.h>
 #else
 #  include <unistd.h>
 #  include <sys/time.h>
+#  include <sys/stat.h>
+#  include <fcntl.h>
 #endif
 
 /* ---------------- потоки ---------------- */
@@ -141,32 +145,89 @@ void dl_sock_close(dl_sock_t s)
 #endif
 }
 
-/* ---------------- 64-битные файлы ---------------- */
+/* ---------------- сырые файлы ---------------- */
 
-int dl_fseek64(FILE *f, long long off, int whence)
+dl_fd_t dl_fd_open_rw(const char *path)
 {
 #ifdef _WIN32
-    return _fseeki64(f, (__int64)off, whence);
+    int fd;
+    fd = _open(path, _O_RDWR | _O_CREAT | _O_TRUNC | _O_BINARY,
+               _S_IREAD | _S_IWRITE);
+    return fd;
 #else
-    return fseeko(f, (off_t)off, whence);
+    return open(path, O_RDWR | O_CREAT | O_TRUNC, 0666);
 #endif
 }
 
-int dl_prealloc(FILE *f, long long size)
+dl_fd_t dl_fd_open_rw_existing(const char *path)
 {
 #ifdef _WIN32
-    if (dl_fseek64(f, size - 1, SEEK_SET) != 0) {
-        return -1;
-    }
-    if (fputc(0, f) == EOF) {
-        return -1;
-    }
-    fflush(f);
-    return 0;
+    return _open(path, _O_RDWR | _O_BINARY, _S_IREAD | _S_IWRITE);
 #else
-    if (ftruncate(fileno(f), (off_t)size) != 0) {
-        return -1;
+    return open(path, O_RDWR);
+#endif
+}
+
+int dl_fd_seek64(dl_fd_t fd, long long off)
+{
+#ifdef _WIN32
+    return (_lseeki64(fd, (__int64)off, SEEK_SET) < 0) ? -1 : 0;
+#else
+    return (lseek(fd, (off_t)off, SEEK_SET) < 0) ? -1 : 0;
+#endif
+}
+
+int dl_fd_write_all(dl_fd_t fd, const char *buf, int len)
+{
+    int done = 0;
+    while (done < len) {
+#ifdef _WIN32
+        int r = _write(fd, buf + done, (unsigned int)(len - done));
+#else
+        ssize_t r = write(fd, buf + done, (size_t)(len - done));
+#endif
+        if (r <= 0) {
+            return -1;
+        }
+        done += r;
     }
     return 0;
+}
+
+int dl_fd_close(dl_fd_t fd)
+{
+    if (fd < 0) {
+        return 0;
+    }
+#ifdef _WIN32
+    return _close(fd);
+#else
+    return close(fd);
+#endif
+}
+
+int dl_fd_prealloc(dl_fd_t fd, long long size)
+{
+#ifdef _WIN32
+    return _chsize_s(fd, (__int64)size);
+#else
+    return ftruncate(fd, (off_t)size);
+#endif
+}
+
+long long dl_file_size(const char *path)
+{
+#ifdef _WIN32
+    struct _stat64 st;
+    if (_stat64(path, &st) != 0) {
+        return -1;
+    }
+    return (long long)st.st_size;
+#else
+    struct stat st;
+    if (stat(path, &st) != 0) {
+        return -1;
+    }
+    return (long long)st.st_size;
 #endif
 }
