@@ -617,6 +617,11 @@ int tls_write_all(tls_conn_t *c, const char *buf, int len)
     if (br_sslio_write_all(&c->ioc, buf, (size_t)len) != 0) {
         return -1;
     }
+    /* Записи могут остаться в буфере движка - проталкиваем в сеть.
+     * (В примере BearSSL после записей всегда br_sslio_flush.) */
+    if (br_sslio_flush(&c->ioc) != 0) {
+        return -1;
+    }
     return 0;
 }
 
