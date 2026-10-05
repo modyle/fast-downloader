@@ -67,6 +67,12 @@ jobs:
           openssl x509 -req -in /tmp/srv.csr -CA /tmp/ca.crt -CAkey /tmp/ca.key -CAcreateserial -out /tmp/srv.crt -days 2 -extfile /tmp/ext.cnf 2>/dev/null
           sudo cp /tmp/ca.crt /usr/local/share/ca-certificates/dltest-ca.crt
           sudo update-ca-certificates
+          echo "--- DEBUG: s_server transcript for our ClientHello ---"
+          (nohup openssl s_server -accept 18444 -cert /tmp/srv.crt -key /tmp/srv.key -msg -state -naccept 1 > /tmp/sdebug.log 2>&1 &); sleep 1
+          printf 'https://localhost:18444/big.bin\ntest_dbg.bin\n1\nn\n' | timeout 45 ./downloader || true
+          echo "=== s_server log ==="
+          head -60 /tmp/sdebug.log
+          pkill -f "s_server -accept 18444" || true
           cat > /tmp/httpsd.py <<'EOF'
           import http.server, ssl
           DATA = open('/tmp/big.bin','rb').read()
