@@ -101,10 +101,17 @@ jobs:
           srv.serve_forever()
           EOF
           (nohup python3 /tmp/httpsd.py > /tmp/httpsd.log 2>&1 &) ; sleep 1
+          ss -ltn | grep 18443 || echo "NOT LISTENING"
+          echo "--- curl probe (reference client) ---"
+          curl -v --cacert /tmp/ca.crt --max-time 20 -o /tmp/curl.bin https://localhost:18443/big.bin 2>&1 | tail -15 || echo "curl exit=$?"
+          cmp /tmp/curl.bin /tmp/big.bin && echo "CURL CONTENT OK"
+          echo "--- our downloader ---"
           printf 'https://localhost:18443/big.bin\ntest_tls.bin\n8\ny\n' | timeout 120 ./downloader
           echo "exit=$?"
           cmp test_tls.bin /tmp/big.bin && echo "HTTPS CONTENT OK"
           rm -f test_tls.bin history.csv
+          echo "--- server log ---"
+          cat /tmp/httpsd.log
           pkill -f /tmp/httpsd.py || true
 
       - name: Upload artifact
