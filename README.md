@@ -75,6 +75,11 @@ Workflow `.github/workflows/build.yml` (триггер — пуш в `c-port`):
 собирает `downloader.exe`. Готовые бинарники — в артефактах запуска
 **Actions → build → downloader-linux / downloader-windows**.
 
+Linux-сборка заодно прогоняет **end-to-end smoke-тесты**: скачивание 6 МБ
+по HTTP (многопоток, сверка побайтово) и по HTTPS против локального сервера
+с самоподписанным CA (настоящий TLS-хендшейк BearSSL + проверка цепочки,
+сверка побайтово). Референсом рядом качает curl.
+
 ```bash
 git checkout c-port
 # ... правим код ...

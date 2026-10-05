@@ -67,43 +67,6 @@ jobs:
           openssl x509 -req -in /tmp/srv.csr -CA /tmp/ca.crt -CAkey /tmp/ca.key -CAcreateserial -out /tmp/srv.crt -days 2 -extfile /tmp/ext.cnf 2>/dev/null
           sudo cp /tmp/ca.crt /usr/local/share/ca-certificates/dltest-ca.crt
           sudo update-ca-certificates
-          echo "--- DEBUG: TCP MITM proxy with hexdump (18445 -> 18443) ---"
-          cat > /tmp/mitm.py <<'EOF'
-          import socket, threading
-          srv = socket.socket()
-          srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-          srv.bind(('127.0.0.1', 18445))
-          srv.listen(16)
-          def pipe(a, b, tag):
-              try:
-                  while True:
-                      d = a.recv(65536)
-                      if not d:
-                          print(tag + ' EOF', flush=True)
-                          break
-                      print('%s %d bytes: %s' % (tag, len(d), d[:48].hex()), flush=True)
-                      b.sendall(d)
-              except Exception as e:
-                  print(tag + ' ERR ' + str(e), flush=True)
-          while True:
-              c, _ = srv.accept()
-              print('MITM accept', flush=True)
-              s = socket.create_connection(('127.0.0.1', 18443))
-              threading.Thread(target=pipe, args=(c, s, 'C->S'), daemon=True).start()
-              threading.Thread(target=pipe, args=(s, c, 'S->C'), daemon=True).start()
-          EOF
-          (nohup python3 /tmp/mitm.py > /tmp/mitm.log 2>&1 &); sleep 1
-          (nohup openssl s_server -accept 18444 -cert /tmp/srv.crt -key /tmp/srv.key -msg -state -naccept 1 > /tmp/sdebug.log 2>&1 &); sleep 1
-          printf 'https://localhost:18444/big.bin\ntest_dbg.bin\n1\nn\n' | timeout 45 ./downloader || true
-          echo "=== s_server log ==="
-          head -60 /tmp/sdebug.log
-          pkill -f "s_server -accept 18444" || true
-          echo "--- downloader via MITM proxy ---"
-          printf 'https://localhost:18445/big.bin\ntest_mitm.bin\n1\nn\n' | timeout 45 ./downloader || true
-          rm -f test_mitm.bin test_dbg.bin history.csv
-          echo "=== mitm log ==="
-          head -40 /tmp/mitm.log
-          pkill -f /tmp/mitm.py || true
           cat > /tmp/httpsd.py <<'EOF'
           import http.server, ssl
           DATA = open('/tmp/big.bin','rb').read()
@@ -138,17 +101,14 @@ jobs:
           srv.serve_forever()
           EOF
           (nohup python3 /tmp/httpsd.py > /tmp/httpsd.log 2>&1 &) ; sleep 1
-          ss -ltn | grep 18443 || echo "NOT LISTENING"
-          echo "--- curl probe (reference client) ---"
-          curl -v --cacert /tmp/ca.crt --max-time 20 -o /tmp/curl.bin https://localhost:18443/big.bin 2>&1 | tail -15 || echo "curl exit=$?"
+          echo "--- curl probe (reference client, must pass) ---"
+          curl -s --cacert /tmp/ca.crt --max-time 20 -o /tmp/curl.bin https://localhost:18443/big.bin
           cmp /tmp/curl.bin /tmp/big.bin && echo "CURL CONTENT OK"
           echo "--- our downloader ---"
           printf 'https://localhost:18443/big.bin\ntest_tls.bin\n8\ny\n' | timeout 120 ./downloader
           echo "exit=$?"
           cmp test_tls.bin /tmp/big.bin && echo "HTTPS CONTENT OK"
           rm -f test_tls.bin history.csv
-          echo "--- server log ---"
-          cat /tmp/httpsd.log
           pkill -f /tmp/httpsd.py || true
 
       - name: Upload artifact
