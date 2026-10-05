@@ -10,6 +10,10 @@
 #include "dl_port.h"
 #include "tls_bear.h"
 
+#ifdef __linux__
+#  include <malloc.h>
+#endif
+
 static void read_line(const char *prompt, char *out, int outcap,
                       const char *def)
 {
@@ -82,14 +86,13 @@ int main(int argc, char **argv)
     (void)argc;
     (void)argv;
 
+#ifdef __linux__
+    /* Меньше malloc-арен glibc -> меньше виртуалки.
+     * Двух арен хватает за глаза (main + пул воркеров делят). */
+    mallopt(M_ARENA_MAX, 2);
+#endif
+
     printf("fast-downloader (C, Linux). http:// и https:// (BearSSL).\n");
-    {
-        char terr[256];
-        if (tls_global_init(NULL, terr, (int)sizeof(terr)) != 0) {
-            printf("Предупреждение: TLS не инициализировался (%s).\n"
-                   "https:// работать не будет, http:// - будет.\n", terr);
-        }
-    }
     hist_load(&hist, "history.csv");
     if (hist.count > 0) {
         show_history(&hist);
@@ -100,6 +103,15 @@ int main(int argc, char **argv)
         strncmp(url, "https://", 8) != 0) {
         printf("Нужен URL вида http:// или https://.\n");
         return 1;
+    }
+    /* TLS-якоря грузим лениво и только для https: разбор ~300 CA
+     * при старте - это 96% всего CPU и ~400 КБ памяти ни за что. */
+    if (strncmp(url, "https://", 8) == 0) {
+        char terr[256];
+        if (tls_global_init(NULL, terr, (int)sizeof(terr)) != 0) {
+            printf("TLS не инициализировался (%s).\n", terr);
+            return 1;
+        }
     }
     file_name_from_url(url, guess, (int)sizeof(guess));
     read_line("Сохранить как", path, (int)sizeof(path), guess);

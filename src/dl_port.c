@@ -21,7 +21,18 @@ int dl_thread_create(dl_thread_t *out, dl_thread_fn_t fn, void *arg)
     *out = h;
     return 0;
 #else
-    return pthread_create(out, NULL, fn, arg);
+    /* Нашим потокам хватает 1 МБ стека с запасом (глубоких фреймов
+     * нет, большие буферы - в куче). По умолчанию pthread даёт 8 МБ
+     * виртуалки на поток - на машине с 256 МБ это расточительно. */
+    pthread_attr_t at;
+    int rc;
+    if (pthread_attr_init(&at) != 0) {
+        return -1;
+    }
+    pthread_attr_setstacksize(&at, (size_t)(1024 * 1024));
+    rc = pthread_create(out, &at, fn, arg);
+    pthread_attr_destroy(&at);
+    return rc;
 #endif
 }
 

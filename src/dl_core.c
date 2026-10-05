@@ -19,7 +19,7 @@
 #define DL_MEASURE_MS 1500
 #define DL_GROW 1.05
 #define DL_MIN_BLOCK (256 * 1024)
-#define DL_BUF (64 * 1024)
+#define DL_BUF (16 * 1024)
 #define DL_MAX_REDIRECTS 5
 
 struct dl {

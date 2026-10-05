@@ -269,6 +269,19 @@ static void on_start(HWND hwnd)
     }
     adaptive = (IsDlgButtonChecked(hwnd, IDC_ADAPTIVE) == BST_CHECKED);
 
+    /* TLS-якоря - лениво и только для https (разбор ~300 CA
+     * при старте - это 96% всего CPU и ~400 КБ памяти ни за что). */
+    if (strncmp(g_url, "https://", 8) == 0) {
+        char terr[256];
+        if (tls_global_init(NULL, terr, (int)sizeof(terr)) != 0) {
+            char msg[512];
+            sprintf(msg, "TLS не инициализировался: %s", terr);
+            MessageBoxA(hwnd, ru(msg),
+                        ru("TLS"), MB_OK | MB_ICONERROR);
+            return;
+        }
+    }
+
     g_dl = dl_create(g_url, g_path, g_max, adaptive);
     if (g_dl == NULL || dl_start(g_dl) != 0) {
         if (g_dl != NULL) {
@@ -468,17 +481,6 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR cmd, int show)
     (void)hPrev;
     (void)cmd;
     g_hInst = hInst;
-
-    {
-        char terr[256];
-        if (tls_global_init(NULL, terr, (int)sizeof(terr)) != 0) {
-            char msg[512];
-            sprintf(msg, "TLS не инициализировался: %s\n"
-                    "https:// работать не будет, http:// - будет.", terr);
-            MessageBoxA(NULL, ru(msg), ru("TLS"),
-                        MB_OK | MB_ICONWARNING);
-        }
-    }
 
     ic.dwSize = sizeof(ic);
     ic.dwICC = ICC_PROGRESS_CLASS | ICC_LISTVIEW_CLASSES;

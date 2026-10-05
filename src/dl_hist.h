@@ -6,7 +6,7 @@
 #ifndef DL_HIST_H
 #define DL_HIST_H
 
-#define HIST_MAX 500
+#define HIST_MAX 100
 
 typedef struct {
     long long ticks;

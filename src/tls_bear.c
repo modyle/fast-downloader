@@ -351,8 +351,12 @@ static int load_system_store(void)
 
 int tls_global_init(const char *bundle_path, char *err, int errcap)
 {
+    static int done = 0;
     int from_bundle = 0;
     int from_system = 0;
+    if (done) {
+        return 0; /* якоря уже загружены, повторно не надо */
+    }
     if (bundle_path == NULL) {
         bundle_path = tls_find_bundle();
     }
@@ -369,6 +373,7 @@ int tls_global_init(const char *bundle_path, char *err, int errcap)
         }
         return -1;
     }
+    done = 1;
     return 0;
 }
 
