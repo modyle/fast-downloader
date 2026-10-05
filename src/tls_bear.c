@@ -551,8 +551,10 @@ tls_conn_t *tls_client_open(dl_sock_t sock, const char *host,
     }
     c->sock = sock;
     br_ssl_client_init_full(&c->sc, &c->xc, g_tas.tas, g_tas.num);
-    /* Важно: в этом дереве BearSSL reset() сбрасывает буфер,
-     * поэтому set_buffer строго ПОСЛЕ reset. */
+    /* Порядок важен: сначала буфер (reset внутри дёргает
+     * set_buffer(NULL), который лишь сохраняет уже заданный),
+     * потом reset. reset возвращает НЕНОЛЬ при успехе. */
+    br_ssl_engine_set_buffer(&c->sc.eng, c->iobuf, BR_SSL_BUFSIZE_BIDI, 1);
     if (br_ssl_client_reset(&c->sc, host, 0) == 0) {
         if (err != NULL && errcap > 0) {
             snprintf(err, (size_t)errcap, "tls reset failed (code %d)",
@@ -563,7 +565,6 @@ tls_conn_t *tls_client_open(dl_sock_t sock, const char *host,
         free(c);
         return NULL;
     }
-    br_ssl_engine_set_buffer(&c->sc.eng, c->iobuf, BR_SSL_BUFSIZE_BIDI, 1);
     if (os_random(seed, sizeof(seed)) != 0) {
         if (err != NULL && errcap > 0) {
             snprintf(err, (size_t)errcap, "no system entropy");
