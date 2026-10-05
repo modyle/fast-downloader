@@ -13,7 +13,7 @@
     <Version>1.0.0</Version>
     <Company>MultiThreadDownloader</Company>
     <Product>MultiThreadDownloader</Product>
-    <Copyright>MIT</Copyright>
+    <Copyright>Copyright (c) 2026 modyle</Copyright>
     <Description>Многопоточный загрузчик файлов (.NET 2.0, C# 2.0, до 32 потоков, адаптивный режим)</Description>
   </PropertyGroup>
 
