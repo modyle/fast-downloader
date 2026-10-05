@@ -16,7 +16,7 @@ ifneq (,$(findstring MSYS,$(UNAME_S)))
 endif
 
 CC ?= gcc
-CFLAGS ?= -O2 -Wall -Wextra
+CFLAGS ?= -O2 -g -Wall -Wextra
 
 BEAR_INC := third_party/bearssl/inc
 BEAR_SRCINC := third_party/bearssl/src
