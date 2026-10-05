@@ -514,12 +514,22 @@ static int low_write(void *ctx, const unsigned char *data, size_t len)
 
 static void tls_err_text(int code, char *out, int outcap)
 {
-    if (code >= 32 && code < 64) {
-        snprintf(out, (size_t)outcap,
-                 "certificate rejected by validator (x509 code %d)", code);
+    const char *what = NULL;
+    if (code == 54) {
+        what = "certificate expired";
+    } else if (code == 56) {
+        what = "server name mismatch (SNI/SAN)";
+    } else if (code == 62) {
+        what = "issuer not trusted (no anchor)";
+    } else if (code >= 32 && code < 64) {
+        what = "certificate rejected by validator";
     } else if (code == BR_ERR_BAD_VERSION) {
-        snprintf(out, (size_t)outcap,
-                 "server requires newer TLS than 1.2 (code %d)", code);
+        what = "server requires newer TLS than 1.2";
+    }
+    if (what != NULL && code != BR_ERR_BAD_VERSION) {
+        snprintf(out, (size_t)outcap, "%s (x509 code %d)", what, code);
+    } else if (what != NULL) {
+        snprintf(out, (size_t)outcap, "%s (code %d)", what, code);
     } else {
         snprintf(out, (size_t)outcap, "tls handshake failed (code %d)",
                  code);
