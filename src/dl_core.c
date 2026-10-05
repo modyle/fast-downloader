@@ -6,6 +6,7 @@
  */
 #include "dl_core.h"
 #include "dl_port.h"
+#include "tls_bear.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -55,17 +56,22 @@ struct dl {
 /* ================= URL ================= */
 
 static int parse_url(const char *url, char *host, int hostcap,
-                     int *port, char *path, int pathcap)
+                     int *port, char *path, int pathcap, int *is_https)
 {
     const char *p;
     const char *slash;
     const char *colon;
     size_t hlen;
 
-    if (strncmp(url, "http://", 7) != 0) {
-        return -1; /* https и остальное не поддерживаем */
+    if (strncmp(url, "http://", 7) == 0) {
+        p = url + 7;
+        *is_https = 0;
+    } else if (strncmp(url, "https://", 8) == 0) {
+        p = url + 8;
+        *is_https = 1;
+    } else {
+        return -1;
     }
-    p = url + 7;
     slash = strchr(p, '/');
     if (slash != NULL) {
         hlen = (size_t)(slash - p);
@@ -94,7 +100,7 @@ static int parse_url(const char *url, char *host, int hostcap,
         }
         memcpy(host, p, hlen);
         host[hlen] = 0;
-        *port = 80;
+        *port = *is_https ? 443 : 80;
     }
     if (host[0] == 0) {
         return -1;
@@ -225,13 +231,57 @@ static int send_all(dl_sock_t s, const char *buf, int len)
     return 0;
 }
 
+/* ================= соединение (plain / TLS) ================= */
+
+typedef struct {
+    int is_tls;
+    dl_sock_t sock;
+    tls_conn_t *tc;
+} conn_t;
+
+static int conn_read(conn_t *c, char *buf, int len)
+{
+    if (c->is_tls) {
+        return tls_read(c->tc, buf, len);
+    } else {
+        int r = recv(c->sock, buf, len, 0);
+        if (r <= 0) {
+            return -1;
+        }
+        return r;
+    }
+}
+
+static int conn_write_all(conn_t *c, const char *buf, int len)
+{
+    if (c->is_tls) {
+        return tls_write_all(c->tc, buf, len);
+    } else {
+        return send_all(c->sock, buf, len);
+    }
+}
+
+static void conn_close(conn_t *c)
+{
+    if (c->is_tls) {
+        if (c->tc != NULL) {
+            tls_close(c->tc);
+            c->tc = NULL;
+        }
+        c->sock = DL_SOCK_INVALID;
+    } else {
+        dl_sock_close(c->sock);
+        c->sock = DL_SOCK_INVALID;
+    }
+}
+
 /* строка без \r\n, 0..n-1 символов, -1 при обрыве */
-static int recv_line(dl_sock_t s, char *buf, int cap)
+static int recv_line(conn_t *cn, char *buf, int cap)
 {
     int n = 0;
     while (n < cap - 1) {
         char c;
-        int r = recv(s, &c, 1, 0);
+        int r = conn_read(cn, &c, 1);
         if (r <= 0) {
             if (n == 0) {
                 return -1;
@@ -252,7 +302,7 @@ static int recv_line(dl_sock_t s, char *buf, int cap)
 /* ================= HTTP ================= */
 
 typedef struct {
-    dl_sock_t sock;
+    conn_t conn;
     int status;
     long long length;   /* -1 = нет/чанки */
     int chunked;
@@ -260,12 +310,13 @@ typedef struct {
     long long range_total; /* из Content-Range, -1 */
 } http_resp_t;
 
-static int read_response(dl_sock_t s, http_resp_t *r, char *location, int loccap)
+static int read_response(conn_t *cn, http_resp_t *r, char *location,
+                         int loccap)
 {
     char line[4096];
     int i;
 
-    if (recv_line(s, line, (int)sizeof(line)) < 0) {
+    if (recv_line(cn, line, (int)sizeof(line)) < 0) {
         return -1;
     }
     if (strncmp(line, "HTTP/", 5) != 0) {
@@ -280,7 +331,7 @@ static int read_response(dl_sock_t s, http_resp_t *r, char *location, int loccap
         location[0] = 0;
     }
     for (i = 0; i < 200; i++) {
-        if (recv_line(s, line, (int)sizeof(line)) < 0) {
+        if (recv_line(cn, line, (int)sizeof(line)) < 0) {
             return -1;
         }
         if (line[0] == 0) {
@@ -322,7 +373,8 @@ static int read_response(dl_sock_t s, http_resp_t *r, char *location, int loccap
 static void resolve_url(const char *base, const char *loc,
                         char *out, int outcap)
 {
-    if (strncmp(loc, "http://", 7) == 0) {
+    if (strncmp(loc, "http://", 7) == 0 ||
+        strncmp(loc, "https://", 8) == 0) {
         strncpy(out, loc, (size_t)(outcap - 1));
         out[outcap - 1] = 0;
         return;
@@ -351,30 +403,48 @@ static void resolve_url(const char *base, const char *loc,
 
 static int http_open(const char *url, const char *method,
                      int use_range, long long rfrom, long long rto,
-                     http_resp_t *out)
+                     http_resp_t *out, char *ebuf, int ecap)
 {
     char cur[2048];
     char host[256];
     char path[2048];
     char req[8192];
     char location[2048];
+    char tlserr[256];
     int redir;
     int port;
+    int is_https = 0;
 
     strncpy(cur, url, sizeof(cur) - 1);
     cur[sizeof(cur) - 1] = 0;
     for (redir = 0; redir < DL_MAX_REDIRECTS; redir++) {
         dl_sock_t s;
+        conn_t cn;
         int n;
         http_resp_t r;
 
         if (parse_url(cur, host, (int)sizeof(host),
-                      &port, path, (int)sizeof(path)) != 0) {
+                      &port, path, (int)sizeof(path), &is_https) != 0) {
             return -1;
         }
         s = tcp_connect(host, port);
         if (s == DL_SOCK_INVALID) {
             return -1;
+        }
+        cn.is_tls = 0;
+        cn.sock = s;
+        cn.tc = NULL;
+        if (is_https) {
+            cn.tc = tls_client_open(s, host, tlserr, (int)sizeof(tlserr));
+            if (cn.tc == NULL) {
+                dl_sock_close(s);
+                if (ebuf != NULL && ecap > 0) {
+                    snprintf(ebuf, (size_t)ecap, "%s", tlserr);
+                    ebuf[ecap - 1] = 0;
+                }
+                return -2; /* TLS не взлетел */
+            }
+            cn.is_tls = 1;
         }
         if (use_range) {
             n = snprintf(req, sizeof(req),
@@ -393,21 +463,33 @@ static int http_open(const char *url, const char *method,
                          method, path, host);
         }
         if (n <= 0 || n >= (int)sizeof(req)) {
-            dl_sock_close(s);
+            conn_close(&cn);
             return -1;
         }
-        if (send_all(s, req, n) != 0) {
-            dl_sock_close(s);
-            return -1;
+        if (conn_write_all(&cn, req, n) != 0) {
+            if (is_https && ebuf != NULL && ecap > 0) {
+                snprintf(ebuf, (size_t)ecap, "tls i/o failed (code %d)",
+                         tls_error_code(cn.tc));
+                ebuf[ecap - 1] = 0;
+            }
+            conn_close(&cn);
+            return (is_https ? -2 : -1);
         }
-        r.sock = s;
-        if (read_response(s, &r, location, (int)sizeof(location)) != 0) {
-            dl_sock_close(s);
-            return -1;
+        memset(&r, 0, sizeof(r));
+        r.conn = cn;
+        if (read_response(&r.conn, &r, location,
+                          (int)sizeof(location)) != 0) {
+            if (is_https && ebuf != NULL && ecap > 0) {
+                snprintf(ebuf, (size_t)ecap, "tls i/o failed (code %d)",
+                         tls_error_code(cn.tc));
+                ebuf[ecap - 1] = 0;
+            }
+            conn_close(&cn);
+            return (is_https ? -2 : -1);
         }
         if ((r.status == 301 || r.status == 302 || r.status == 303 ||
              r.status == 307 || r.status == 308) && location[0] != 0) {
-            dl_sock_close(s);
+            conn_close(&cn);
             resolve_url(cur, location, cur, (int)sizeof(cur));
             continue;
         }
@@ -419,8 +501,7 @@ static int http_open(const char *url, const char *method,
 
 static void http_close(http_resp_t *r)
 {
-    dl_sock_close(r->sock);
-    r->sock = DL_SOCK_INVALID;
+    conn_close(&r->conn);
 }
 
 /* ================= probe ================= */
@@ -431,14 +512,14 @@ static void probe_url(downloader_t *d, long long *total, int *ranges)
 
     *total = -1;
     *ranges = 0;
-    if (http_open(d->url, "HEAD", 0, 0, 0, &r) == 0) {
+    if (http_open(d->url, "HEAD", 0, 0, 0, &r, NULL, 0) == 0) {
         *total = r.length;
         if (r.accept_ranges) {
             *ranges = 1;
         }
         http_close(&r);
     }
-    if (http_open(d->url, "GET", 1, 0, 0, &r) == 0) {
+    if (http_open(d->url, "GET", 1, 0, 0, &r, NULL, 0) == 0) {
         if (r.status == 206) {
             *ranges = 1;
             if (r.range_total > 0) {
@@ -494,7 +575,7 @@ static long long file_len(const char *path)
 /* ================= один поток ================= */
 
 /* чтение chunked-тела в файл, 0 = ok */
-static int read_chunked(dl_sock_t s, FILE *f, downloader_t *d,
+static int read_chunked(conn_t *cn, FILE *f, downloader_t *d,
                         long long *got)
 {
     char line[128];
@@ -511,7 +592,7 @@ static int read_chunked(dl_sock_t s, FILE *f, downloader_t *d,
             free(buf);
             return -2; /* стоп */
         }
-        if (recv_line(s, line, (int)sizeof(line)) < 0) {
+        if (recv_line(cn, line, (int)sizeof(line)) < 0) {
             free(buf);
             return -1;
         }
@@ -523,7 +604,7 @@ static int read_chunked(dl_sock_t s, FILE *f, downloader_t *d,
         if (chunk == 0) {
             /* трейлеры до пустой строки */
             for (;;) {
-                if (recv_line(s, line, (int)sizeof(line)) < 0) {
+                if (recv_line(cn, line, (int)sizeof(line)) < 0) {
                     break;
                 }
                 if (line[0] == 0) {
@@ -536,7 +617,7 @@ static int read_chunked(dl_sock_t s, FILE *f, downloader_t *d,
         left = chunk;
         while (left > 0) {
             int want = (left > DL_BUF) ? DL_BUF : (int)left;
-            int r = recv(s, buf, want, 0);
+            int r = conn_read(cn, buf, want);
             if (r <= 0) {
                 free(buf);
                 return -1;
@@ -553,7 +634,7 @@ static int read_chunked(dl_sock_t s, FILE *f, downloader_t *d,
         /* CRLF после чанка */
         {
             char crlf[2];
-            int r = recv(s, crlf, 2, 0);
+            int r = conn_read(cn, crlf, 2);
             (void)r;
         }
     }
@@ -567,9 +648,16 @@ static void download_single(downloader_t *d)
     double start;
     double last;
     long long last_dl = 0;
+    char herr[256] = "";
+    int horc;
 
-    if (http_open(d->url, "GET", 0, 0, 0, &r) != 0) {
-        set_fail(d, "connect/request failed");
+    horc = http_open(d->url, "GET", 0, 0, 0, &r, herr, (int)sizeof(herr));
+    if (horc != 0) {
+        if (horc == -2 && herr[0] != 0) {
+            set_fail(d, herr);
+        } else {
+            set_fail(d, "connect/request failed");
+        }
         return;
     }
     if (r.status != 200) {
@@ -597,7 +685,7 @@ static void download_single(downloader_t *d)
     start = dl_now();
     last = start;
     if (r.chunked) {
-        int rc = read_chunked(r.sock, f, d, NULL);
+        int rc = read_chunked(&r.conn, f, d, NULL);
         free(buf);
         fclose(f);
         http_close(&r);
@@ -619,7 +707,7 @@ static void download_single(downloader_t *d)
             if (d->stop) {
                 break;
             }
-            got = recv(r.sock, buf, want, 0);
+            got = conn_read(&r.conn, buf, want);
             if (got <= 0) {
                 break;
             }
@@ -661,7 +749,7 @@ static void download_single(downloader_t *d)
         if (d->stop) {
             break;
         }
-        got = recv(r.sock, buf, DL_BUF, 0);
+        got = conn_read(&r.conn, buf, DL_BUF);
         if (got <= 0) {
             break;
         }
@@ -723,8 +811,13 @@ static int download_block(downloader_t *d, int index)
     }
     want = end - start + 1;
 
-    if (http_open(d->url, "GET", 1, start, end, &r) != 0) {
-        return 0;
+    {
+        char herr[256];
+        herr[0] = 0;
+        if (http_open(d->url, "GET", 1, start, end, &r,
+                      herr, (int)sizeof(herr)) != 0) {
+            return 0;
+        }
     }
     if (r.status != 206) {
         http_close(&r);
@@ -754,7 +847,7 @@ static int download_block(downloader_t *d, int index)
             ok = 1; /* выходим без перепостановки */
             break;
         }
-        n = recv(r.sock, buf, want_now, 0);
+        n = conn_read(&r.conn, buf, want_now);
         if (n <= 0) {
             break;
         }
@@ -1050,8 +1143,9 @@ static void *dl_controller(void *arg)
 
     if (d->stop) {
         set_done(d, DL_CANCEL);
-    } else if (strncmp(d->url, "http://", 7) != 0) {
-        set_fail(d, "only http:// supported (C port has no TLS)");
+    } else if (strncmp(d->url, "http://", 7) != 0 &&
+               strncmp(d->url, "https://", 8) != 0) {
+        set_fail(d, "only http:// and https:// supported");
     } else if (total <= 0 || !ranges || total < 1024 * 1024 ||
                d->max_threads == 1) {
         download_single(d);

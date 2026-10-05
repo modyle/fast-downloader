@@ -14,6 +14,7 @@
 #include "dl_core.h"
 #include "dl_hist.h"
 #include "dl_port.h"
+#include "tls_bear.h"
 
 #define IDC_URL        101
 #define IDC_PATH       102
@@ -229,10 +230,10 @@ static void on_start(HWND hwnd)
         return;
     }
     GetWindowTextA(hUrl, g_url, (int)sizeof(g_url));
-    if (strncmp(g_url, "http://", 7) != 0) {
+    if (strncmp(g_url, "http://", 7) != 0 &&
+        strncmp(g_url, "https://", 8) != 0) {
         MessageBoxA(hwnd,
-                    ru("Введите корректный URL (http://).\n"
-                       "https в C-версии не поддерживается (нет TLS)."),
+                    ru("Введите корректный URL (http:// или https://)."),
                     ru("Проверка URL"), MB_OK | MB_ICONWARNING);
         return;
     }
@@ -467,6 +468,17 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR cmd, int show)
     (void)hPrev;
     (void)cmd;
     g_hInst = hInst;
+
+    {
+        char terr[256];
+        if (tls_global_init(NULL, terr, (int)sizeof(terr)) != 0) {
+            char msg[512];
+            sprintf(msg, "TLS не инициализировался: %s\n"
+                    "https:// работать не будет, http:// - будет.", terr);
+            MessageBoxA(NULL, ru(msg), ru("TLS"),
+                        MB_OK | MB_ICONWARNING);
+        }
+    }
 
     ic.dwSize = sizeof(ic);
     ic.dwICC = ICC_PROGRESS_CLASS | ICC_LISTVIEW_CLASSES;

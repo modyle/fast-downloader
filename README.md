@@ -9,10 +9,25 @@ HTTP через сырые сокеты, потоки — Win32 API / pthreads �
 - Общий код (`dl_core.c`, `dl_hist.c`, `dl_port.c`) один на обе ОС,
   различия — только в `dl_port.*` и в `main_win32.c` / `main_linux.c`.
 
-> ⚠️ Честное ограничение C-порта: **только `http://`, без TLS**.
-> Тянуть OpenSSL ради «просто потому что» не стали — для `https://`
-> пользуйтесь веткой `main` (C#) или прогоняйте через http-прокси.
-> Файлы больше 2 ГБ — можно (везде `long long` и 64-битные смещения).
+## HTTPS: встроенный BearSSL
+
+TLS-стек **завендорен** (`third_party/bearssl`, MIT) — никаких внешних
+зависимостей, работает даже на **Windows XP** (где системный SChannel
+умеет максимум TLS 1.0 и современные сайты его отшивают):
+
+- Клиент TLS 1.0–1.2 (сервер выберет 1.2 везде, где он есть), SNI,
+  проверка цепочки **и** имени хоста.
+- Якоря доверия: **бандл Mozilla** (`third_party/cacert.pem`, fallback
+  для протухших систем) **плюс системное хранилище ОС**
+  (Windows ROOT store через CryptoAPI / Linux CA-bundle) — второе важно
+  для корпоративных MITM-прокси.
+- Entropy: `RtlGenRandom` (advapi32, есть на XP) / `/dev/urandom`.
+- `cacert.pem` ищется рядом с exe, в текущей папке и в `third_party/`;
+  в релизные архивы кладётся рядом с бинарником.
+
+Ограничения честно: нет TLS 1.3 (BearSSL его не умеет; таких
+строго-1.3-only сайтов в дикой природе почти нет), нет клиентских
+сертификатов.
 
 ## Возможности
 
@@ -86,12 +101,15 @@ URL файла: http://example.com/big.iso
 
 ```text
 Makefile                  # Linux: downloader / Windows: downloader.exe
-build_msvc.bat            # сборка через cl
-src/dl_core.h/.c          # ядро: HTTP, probe, очередь блоков, адаптив
+build_msvc.bat            # сборка через cl (best-effort, в CI не гоняется)
+src/dl_core.h/.c          # ядро: HTTP(S), probe, очередь блоков, адаптив
 src/dl_port.h/.c          # #ifdef _WIN32: потоки, мьютексы, сокеты, файлы
 src/dl_hist.h/.c          # history.csv + base64 + формат размеров
+src/tls_bear.h/.c         # HTTPS: BearSSL, якоря (бандл + система)
 src/main_win32.c          # GUI Win32 API
 src/main_linux.c          # консоль Linux
+third_party/bearssl/      # вендоренный BearSSL (MIT)
+third_party/cacert.pem    # корневые CA Mozilla (fallback)
 ```
 
 ## Лицензия

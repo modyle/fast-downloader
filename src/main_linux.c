@@ -8,6 +8,7 @@
 #include "dl_core.h"
 #include "dl_hist.h"
 #include "dl_port.h"
+#include "tls_bear.h"
 
 static void read_line(const char *prompt, char *out, int outcap,
                       const char *def)
@@ -81,15 +82,23 @@ int main(int argc, char **argv)
     (void)argc;
     (void)argv;
 
-    printf("fast-downloader (C, Linux). Только http:// (без TLS).\n");
+    printf("fast-downloader (C, Linux). http:// и https:// (BearSSL).\n");
+    {
+        char terr[256];
+        if (tls_global_init(NULL, terr, (int)sizeof(terr)) != 0) {
+            printf("Предупреждение: TLS не инициализировался (%s).\n"
+                   "https:// работать не будет, http:// - будет.\n", terr);
+        }
+    }
     hist_load(&hist, "history.csv");
     if (hist.count > 0) {
         show_history(&hist);
     }
 
     read_line("URL файла", url, (int)sizeof(url), NULL);
-    if (strncmp(url, "http://", 7) != 0) {
-        printf("Нужен URL вида http://... (https в C-версии не поддерживается).\n");
+    if (strncmp(url, "http://", 7) != 0 &&
+        strncmp(url, "https://", 8) != 0) {
+        printf("Нужен URL вида http:// или https://.\n");
         return 1;
     }
     file_name_from_url(url, guess, (int)sizeof(guess));
