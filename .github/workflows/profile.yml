@@ -1,0 +1,92 @@
+name: profile
+
+# Замер памяти и горячих точек C-порта.
+# Запуск вручную: gh workflow run profile --ref c-port
+# (в обычные сборки не входит, чтобы их не тормозить).
+
+on:
+  workflow_dispatch:
+
+jobs:
+  profile:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: c-port
+
+      - name: Build (gcc)
+        run: make
+
+      - name: Install tools
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq valgrind time
+
+      - name: Test file + Range server
+        run: |
+          python3 -c "open('/tmp/big20.bin','wb').write(bytes(((i*31+7)&0xFF) for i in range(20*1024*1024)))"
+          sha256sum /tmp/big20.bin | tee /tmp/big20.sha
+          cat > /tmp/httpd.py <<'EOF'
+          import http.server
+          DATA = open('/tmp/big20.bin','rb').read()
+          class H(http.server.BaseHTTPRequestHandler):
+              def log_message(self, *a): pass
+              def do_HEAD(self):
+                  self.send_response(200)
+                  self.send_header('Content-Length', str(len(DATA)))
+                  self.send_header('Accept-Ranges', 'bytes')
+                  self.end_headers()
+              def do_GET(self):
+                  rg = self.headers.get('Range')
+                  a, b = 0, len(DATA)-1
+                  code = 200
+                  if rg and rg.startswith('bytes='):
+                      s = rg[6:].split('-')
+                      a = int(s[0] or 0)
+                      b = int(s[1]) if len(s) > 1 and s[1] else len(DATA)-1
+                      code = 206
+                  self.send_response(code)
+                  if code == 206:
+                      self.send_header('Content-Range', 'bytes %d-%d/%d' % (a, b, len(DATA)))
+                  else:
+                      self.send_header('Accept-Ranges', 'bytes')
+                  self.send_header('Content-Length', str(b-a+1))
+                  self.end_headers()
+                  self.wfile.write(DATA[a:b+1])
+          http.server.HTTPServer(('127.0.0.1', 18082), H).serve_forever()
+          EOF
+          (nohup python3 /tmp/httpd.py > /tmp/httpd.log 2>&1 &) ; sleep 1
+
+      - name: Peak RSS (20MB, 8 threads, adaptive)
+        run: |
+          printf 'http://127.0.0.1:18082/big20.bin\np_rss.bin\n8\ny\n' | timeout 300 /usr/bin/time -v ./downloader 2>&1 | tee /tmp/rss.log | grep -E "Maximum resident|Elapsed|Percent|User time|System time"
+          cmp p_rss.bin /tmp/big20.bin && echo "RSS RUN CONTENT OK"
+          rm -f p_rss.bin history.csv
+
+      - name: Heap breakdown (massif, 20MB, 8 threads)
+        run: |
+          printf 'http://127.0.0.1:18082/big20.bin\np_mass.bin\n8\ny\n' | timeout 600 valgrind --tool=massif --massif-out-file=/tmp/massif.out --pages-as-heap=yes ./downloader > /tmp/massif_run.log 2>&1 || true
+          cmp p_mass.bin /tmp/big20.bin && echo "MASSIF RUN CONTENT OK"
+          rm -f p_mass.bin history.csv
+          echo "=== massif peak (graph + top snapshots) ==="
+          ms_print /tmp/massif.out 2>/dev/null | head -120
+
+      - name: Hotspots (callgrind, 20MB, 8 threads)
+        run: |
+          printf 'http://127.0.0.1:18082/big20.bin\np_call.bin\n8\ny\n' | timeout 900 valgrind --tool=callgrind --callgrind-out-file=/tmp/call.out ./downloader > /tmp/call_run.log 2>&1 || true
+          cmp p_call.bin /tmp/big20.bin && echo "CALLGRIND RUN CONTENT OK"
+          rm -f p_call.bin history.csv
+          echo "=== callgrind top (self cost %) ==="
+          callgrind_annotate --show-percs=yes /tmp/call.out 2>/dev/null | head -70
+
+      - name: Upload raw results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: profile-results
+          path: |
+            /tmp/rss.log
+            /tmp/massif.out
+            /tmp/call.out
+            /tmp/massif_run.log
+            /tmp/call_run.log
